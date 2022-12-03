@@ -1,17 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:web_socket_channel/io.dart';
-import 'package:web_socket_channel/status.dart' as status;
 
 import 'package:flutter_phoenix/flutter_phoenix.dart';
 
 import 'dart:ui' as ui;
-
-import 'package:web_socket_channel/web_socket_channel.dart';
 
 void main() {
   runApp(
@@ -205,37 +202,24 @@ class Pxls {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  // late Future<Pxls> futurePxls;
-  // late Uint32List rawPixels;
-  // late Future<ui.Image> futureImage;
-  // late Uint32List rawPalette;
-
   late Pxls pxls;
   late Future<Pxls> futurePxls;
-  late Uint32List rawPixels = Uint32List(0);
-  late Uint32List convertedPalette = Uint32List(0);
   late String lastPacket = '';
 
-  final WebSocketChannel channel = WebSocketChannel.connect(Uri.parse("wss://pxls.space/ws"));
+  late Future<WebSocket> futureWebSocket = WebSocket.connect("wss://pxls.space/ws", headers: {
+    "pxls-token": ""
+  });
+  late WebSocket webSocket;
 
   @override
   void initState() {
     super.initState();
     futurePxls = Pxls.fetchInit();
-    // Pxls.fetchInit().then((pxls) => {
-    //   rawPixels = boardDataAsUint32List(pxls.boardData, pxls.info),
-    //   makeImage(pxls.boardData, pxls.info).then((image) => {
-    //     setState(() {
-    //       this.pxls = pxls;
-    //       convertedPalette = paletteAsUint32List(pxls.info.palette);
-    //     })
-    //   })
-    // });
   }
 
   @override
   void dispose() {
-    channel.sink.close();
+    webSocket.close();
     super.dispose();
   }
 
@@ -252,50 +236,170 @@ class _MyHomePageState extends State<MyHomePage> {
             if (pxlsSnapshot.hasData) {
               pxls = pxlsSnapshot.data!;
 
-              return StreamBuilder(
-                stream: channel.stream,
-                builder: (context, socketSnapshot) {
-                  if (socketSnapshot.hasData) {
-                    if (socketSnapshot.data != lastPacket) {
-                      // Required to prevent loop with setState for image below
-                      lastPacket = socketSnapshot.data;
-                      var packet = jsonDecode(socketSnapshot.data);
-                      if (packet['type'] == 'pixel') {
-                        for (dynamic pixel in packet['pixels']) {
-                          int x = pixel['x'];
-                          int y = pixel['y'];
-                          int color = pixel['color'];
-                          pxls.rawPixels[y * pxls.info.width + x] = pxls.paletteIndexToInt(color);
-                          ui.decodeImageFromPixels(pxls.rawPixels.buffer.asUint8List(), pxls.info.width, pxls.info.height, ui.PixelFormat.rgba8888, (result) {
-                            // Need to setState to trigger build
-                            setState(() {
-                              pxls.image = result;
-                            });
-                          });
+              return FutureBuilder<WebSocket>(
+                future: futureWebSocket,
+                builder: (context, webSocketSnapshot) {
+                  if (webSocketSnapshot.hasData) {
+                    webSocket = webSocketSnapshot.data!;
+
+                    return StreamBuilder(
+                      stream: webSocket,
+                      builder: (context, socketSnapshot) {
+                        if (socketSnapshot.hasData) {
+                          late Offset tapOffset;
+
+                          return StatefulBuilder(
+                            builder: (context, setState) {
+                              if (socketSnapshot.data != lastPacket) {
+                                // Required to prevent loop with setState for image below
+                                lastPacket = socketSnapshot.data;
+                                var packet = jsonDecode(socketSnapshot.data);
+                                print(packet);
+                                if (packet['type'] == 'pixel') {
+                                  for (dynamic pixel in packet['pixels']) {
+                                    int x = pixel['x'];
+                                    int y = pixel['y'];
+                                    int color = pixel['color'];
+                                    // print(pixel);
+                                    pxls.rawPixels[y * pxls.info.width + x] = pxls.paletteIndexToInt(color);
+                                    ui.decodeImageFromPixels(pxls.rawPixels.buffer.asUint8List(), pxls.info.width, pxls.info.height, ui.PixelFormat.rgba8888, (result) {
+                                      // Need to setState to trigger build
+                                      setState(() {
+                                        // print('setState');
+                                        pxls.image = result;
+                                      });
+                                    });
+                                  }
+                                }
+                              }
+                              return Container(
+                                color: Colors.white,
+                                child: InteractiveViewer(
+                                    boundaryMargin: const EdgeInsets.all(250),
+                                    minScale: 0.1,
+                                    maxScale: 50,
+                                    constrained: false,
+                                    clipBehavior: Clip.hardEdge,
+                                    child: GestureDetector(
+                                      onTap: () {
+                                        var x = tapOffset.dx.toInt();
+                                        var y = tapOffset.dy.toInt();
+                                        var encoded = jsonEncode({
+                                          "type": "pixel",
+                                          "x": x,
+                                          "y": y,
+                                          "color": 5
+                                        });
+                                        webSocket.add(encoded);
+                                        webSocket.add("{\"type\":\"ChatMessage\",\"message\":\"test message :3\",\"replyingToId\":0,\"replyShouldMention\":true}");
+                                      },
+                                      onTapDown: (details) {
+                                        setState(() {
+                                          tapOffset = details.localPosition;
+                                        });
+                                      },
+                                      onLongPressDown: (details) {
+
+                                      },
+                                      child: RawImage(
+                                        filterQuality: FilterQuality.none,
+                                        image: pxls.image,
+                                      ),
+                                    )
+                                ),
+                              );
+                            },
+                          );
+                        } else if (socketSnapshot.hasError) {
+                          return Text('Could not load socket connection: ${socketSnapshot.error}');
                         }
-                      }
-                    }
-                    return Container(
-                      color: Colors.white,
-                      child: InteractiveViewer(
-                          boundaryMargin: const EdgeInsets.all(250),
-                          minScale: 0.1,
-                          maxScale: 50,
-                          constrained: false,
-                          clipBehavior: Clip.hardEdge,
-                          child: RawImage(
-                            filterQuality: FilterQuality.none,
-                            image: pxls.image,
-                          )
-                      ),
+
+                        return const CircularProgressIndicator();
+                      },
                     );
-                  } else if (socketSnapshot.hasError) {
-                    return Text('Could not load socket connection: ${socketSnapshot.error}');
+                  } else if (webSocketSnapshot.hasError) {
+                    return Text('WebSocket error: ${webSocketSnapshot.error}');
                   }
 
                   return const CircularProgressIndicator();
                 },
               );
+
+              // return StreamBuilder(
+              //   stream: channel.stream,
+              //   builder: (context, socketSnapshot) {
+              //     if (socketSnapshot.hasData) {
+              //       late Offset tapOffset;
+              //
+              //       return StatefulBuilder(
+              //         builder: (context, setState) {
+              //           if (socketSnapshot.data != lastPacket) {
+              //             // Required to prevent loop with setState for image below
+              //             lastPacket = socketSnapshot.data;
+              //             var packet = jsonDecode(socketSnapshot.data);
+              //             if (packet['type'] == 'pixel') {
+              //               for (dynamic pixel in packet['pixels']) {
+              //                 int x = pixel['x'];
+              //                 int y = pixel['y'];
+              //                 int color = pixel['color'];
+              //                 // print(pixel);
+              //                 pxls.rawPixels[y * pxls.info.width + x] = pxls.paletteIndexToInt(color);
+              //                 ui.decodeImageFromPixels(pxls.rawPixels.buffer.asUint8List(), pxls.info.width, pxls.info.height, ui.PixelFormat.rgba8888, (result) {
+              //                   // Need to setState to trigger build
+              //                   setState(() {
+              //                     // print('setState');
+              //                     pxls.image = result;
+              //                   });
+              //                 });
+              //               }
+              //             }
+              //           }
+              //           return Container(
+              //             color: Colors.white,
+              //             child: InteractiveViewer(
+              //                 boundaryMargin: const EdgeInsets.all(250),
+              //                 minScale: 0.1,
+              //                 maxScale: 50,
+              //                 constrained: false,
+              //                 clipBehavior: Clip.hardEdge,
+              //                 child: GestureDetector(
+              //                   onTap: () {
+              //                     var x = tapOffset.dx.toInt();
+              //                     var y = tapOffset.dy.toInt();
+              //                     channel.sink.add(jsonEncode({
+              //                       "type": "pixel",
+              //                       "x": x,
+              //                       "y": y,
+              //                       "color": 5
+              //                     }));
+              //                   },
+              //                   onTapDown: (details) {
+              //                     setState(() {
+              //                       tapOffset = details.localPosition;
+              //                     });
+              //                   },
+              //                   onLongPressDown: (details) {
+              //
+              //                   },
+              //                   // onLongPressDown: (details) {
+              //                   //   print('onLongPress ${details.localPosition}');
+              //                   // },
+              //                   child: RawImage(
+              //                     filterQuality: FilterQuality.none,
+              //                     image: pxls.image,
+              //                   ),
+              //                 )
+              //             ),
+              //           );
+              //         },
+              //       );
+              //     } else if (socketSnapshot.hasError) {
+              //       return Text('Could not load socket connection: ${socketSnapshot.error}');
+              //     }
+              //
+              //     return const CircularProgressIndicator();
+              //   },
+              // );
             } else if (pxlsSnapshot.hasError) {
               return Text('Error loading Pxls information: ${pxlsSnapshot.error}');
             }
